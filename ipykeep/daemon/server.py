@@ -33,11 +33,18 @@ _NON_KERNEL_METHODS = {"ping", "status", "shutdown"}
 
 
 class IpykeepServer:
-    def __init__(self, notebook: Path, config: Config):
+    def __init__(self, notebook: Path, config: Config, serve: bool = False,
+                 server_log=None):
         self.notebook = Path(notebook)
         self.config = config
-        self.session = KernelSession(self.notebook)
+        self.serve = serve or config.serve
+        self.session = KernelSession(
+            self.notebook, serve=self.serve,
+            server_command=config.server_command, server_port=config.server_port,
+            log_file=server_log,
+        )
         self.token = secrets.token_hex(16)
+        self.port: int | None = None
         self.warming = True
         self.warm_error: str | None = None
         self.tracker: StalenessTracker | None = None
@@ -62,9 +69,9 @@ class IpykeepServer:
         self._kpool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kernel")
 
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
-        port = self._server.sockets[0].getsockname()[1]
-        write_runtime(self.notebook, port=port, token=self.token, pid=os.getpid())
-        log.info("listening on 127.0.0.1:%d (notebook=%s)", port, self.notebook)
+        self.port = self._server.sockets[0].getsockname()[1]
+        write_runtime(self.notebook, port=self.port, token=self.token, pid=os.getpid())
+        log.info("listening on 127.0.0.1:%d (notebook=%s)", self.port, self.notebook)
 
         warm_task = asyncio.create_task(self._warm())
         try:
@@ -86,6 +93,10 @@ class IpykeepServer:
     async def _warm(self) -> None:
         try:
             await self._k(self.session.start)
+            # Record the hosted Jupyter server's pid for orphan cleanup.
+            if self.serve and self.port is not None:
+                write_runtime(self.notebook, port=self.port, token=self.token,
+                              pid=os.getpid(), server_pid=self.session.server_pid())
             await self._k(self.session.warm)
             self.tracker = StalenessTracker(self.session)
             self.inspector = Inspector(self.session, self.config.inspect_timeout_s,
@@ -229,7 +240,7 @@ class IpykeepServer:
         return st
 
 
-def run_daemon(notebook: Path) -> None:
+def run_daemon(notebook: Path, serve: bool = False) -> None:
     notebook = Path(notebook).resolve()
     config = load_config()
     logging.basicConfig(
@@ -237,9 +248,15 @@ def run_daemon(notebook: Path) -> None:
         level=getattr(logging, config.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    log.info("daemon starting for %s", notebook)
+    log.info("daemon starting for %s (serve=%s)", notebook, serve or config.serve)
+    server_log = open(log_path(notebook), "ab")  # capture jupyter server output too
     try:
-        asyncio.run(IpykeepServer(notebook, config).run())
+        asyncio.run(IpykeepServer(notebook, config, serve=serve, server_log=server_log).run())
     except Exception:
         log.exception("daemon crashed")
         raise
+    finally:
+        try:
+            server_log.close()
+        except Exception:
+            pass

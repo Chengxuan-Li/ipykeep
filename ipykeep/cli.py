@@ -73,7 +73,7 @@ def _client_call(notebook: Path, method: str, params: Optional[dict[str, Any]] =
     return resp.get("result")
 
 
-def _spawn_daemon(notebook: Path) -> None:
+def _spawn_daemon(notebook: Path, serve: bool = False) -> None:
     logf = open(log_path(notebook), "ab")
     kwargs: dict[str, Any] = dict(stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, close_fds=True)
     if sys.platform == "win32":
@@ -84,13 +84,19 @@ def _spawn_daemon(notebook: Path) -> None:
         )
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen([sys.executable, "-m", "ipykeep", "_serve", str(notebook)], **kwargs)
+    argv = [sys.executable, "-m", "ipykeep", "_serve", str(notebook)]
+    if serve:
+        argv.append("--serve")
+    subprocess.Popen(argv, **kwargs)
 
 
 # --------------------------------------------------------------------- commands
 @app.command()
 def start(
     notebook: str = typer.Argument(..., help="Path to the .ipynb to serve."),
+    serve: bool = typer.Option(
+        False, "--serve/--no-serve",
+        help="Host the kernel in a Jupyter server so an IDE (VS Code / Lab) can attach."),
     timeout: float = typer.Option(180.0, help="Seconds to wait for warm-up."),
 ) -> None:
     """Start the daemon: boot kernel, load ipyflow, warm all cells."""
@@ -105,7 +111,7 @@ def start(
         raise typer.Exit(0)
 
     typer.echo(f"starting daemon for {nb.name} ...")
-    _spawn_daemon(nb)
+    _spawn_daemon(nb, serve=serve)
 
     deadline = time.time() + timeout
     reachable = False
@@ -143,6 +149,13 @@ def start(
             f"ipyflow_loaded={st['ipyflow_loaded']}",
             fg="green",
         )
+        if st.get("server_url"):
+            typer.secho(f"IDE: open {st['server_url']}", fg="cyan")
+            typer.secho(
+                "     (browser: open the URL; VS Code: 'Jupyter: Connect to a Remote "
+                "Jupyter Server' -> paste it, then pick the running kernel)",
+                fg="cyan",
+            )
 
 
 @app.command()
@@ -263,11 +276,11 @@ def namespace(notebook: Optional[str] = typer.Argument(None, help="Notebook path
 
 
 @app.command(name="_serve", hidden=True)
-def _serve(notebook: str) -> None:
+def _serve(notebook: str, serve: bool = typer.Option(False, "--serve")) -> None:
     """Internal: run the daemon event loop in the foreground (spawned by start)."""
     from ipykeep.daemon.server import run_daemon
 
-    run_daemon(Path(notebook).resolve())
+    run_daemon(Path(notebook).resolve(), serve=serve)
 
 
 if __name__ == "__main__":

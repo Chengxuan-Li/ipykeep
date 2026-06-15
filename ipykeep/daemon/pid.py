@@ -36,12 +36,14 @@ def log_path(notebook: Path) -> Path:
     return runtime_dir() / f"{project_hash(notebook)}.log"
 
 
-def write_runtime(notebook: Path, *, port: int, token: str, pid: int) -> Path:
+def write_runtime(notebook: Path, *, port: int, token: str, pid: int,
+                  server_pid: Optional[int] = None) -> Path:
     info = {
         "pid": pid,
         "port": port,
         "token": token,
         "notebook": str(Path(notebook).resolve()),
+        "server_pid": server_pid,
         "started_at": time.time(),
     }
     path = descriptor_path(notebook)

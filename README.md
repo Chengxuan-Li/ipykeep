@@ -107,6 +107,37 @@ notebook argument is optional.
 
 ---
 
+## Connecting an IDE to the live kernel (`--serve`)
+
+By default ipykeep runs a **bare** kernel — great for headless agents, but IDEs
+(VS Code, JupyterLab/Notebook) connect to a Jupyter *server*, not a bare kernel.
+Start with `--serve` and ipykeep hosts the kernel inside a Jupyter server **it
+owns**, so you can attach an IDE to the very same warm kernel the agent drives:
+
+```bash
+ipykeep start --serve analysis.ipynb        # (requires: pip install "ipykeep[serve]")
+# -> prints:  IDE: open http://127.0.0.1:<port>/lab?token=<token>
+```
+
+- **Browser**: open that URL — JupyterLab opens the notebook already bound to the
+  running kernel.
+- **VS Code**: *Jupyter: Connect to a Remote Jupyter Server* → paste the URL →
+  open the notebook → pick the running kernel.
+
+`ipykeep status` reports `server_url` and `server_token`. The launcher is
+configurable (`server_command = "lab" | "notebook" | "server"`). ipykeep keeps
+driving the kernel exactly as in bare mode; the IDE is just another client of the
+same kernel.
+
+**Caveats:** it's one shared namespace, so (1) let the agent own cell execution
+via `run-stale --execute` and use the IDE for inspection/scratch — manually
+running tracked cells from the IDE can lag ipykeep's stale set until the next
+`run-stale`; and (2) only one side should edit/save the `.ipynb` file at a time.
+Upside: with an IDE attached, outputs are persisted back to the notebook (the
+CLI-only path does not write outputs).
+
+---
+
 ## Configuration
 
 Optional `[tool.ipykeep]` table in `ipykeep.toml` or `pyproject.toml`:
@@ -118,6 +149,9 @@ inspect_timeout_s = 5                 # per-summary timeout
 inspect_sample_rows = 5               # rows returned by the DataFrame summarizer
 watch_debounce_ms = 500               # file watcher debounce
 log_level = "INFO"
+serve = false                         # host the kernel in a Jupyter server (IDE attach)
+server_command = "lab"                # "lab" | "notebook" | "server"
+server_port = 0                       # 0 = pick a free port
 
 [tool.ipykeep.inspection]
 summarizers = []                      # "module.path:callable" custom summarizers

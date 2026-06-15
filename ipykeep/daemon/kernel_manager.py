@@ -146,27 +146,53 @@ _ipykeep_depgraph()
 
 
 class KernelSession:
-    def __init__(self, notebook: Path):
+    def __init__(self, notebook: Path, serve: bool = False,
+                 server_command: str = "lab", server_port: int = 0,
+                 log_file=None):
         self.notebook = Path(notebook)
+        self.serve = serve
+        self.server_command = server_command
+        self.server_port = server_port
+        self.log_file = log_file
         self.km = None
         self.kc = None
+        self.host = None  # JupyterServerHost when serving
         self.cells: list[CellInfo] = []
         self._last_exec_count: Optional[int] = None
         self._ipyflow_loaded = False
 
     # ------------------------------------------------------------------ start
     def start(self) -> None:
-        from jupyter_client.manager import start_new_kernel
+        if self.serve:
+            self._start_served()
+        else:
+            from jupyter_client.manager import start_new_kernel
 
-        log.info("starting kernel")
-        self.km, self.kc = start_new_kernel(startup_timeout=60)
+            log.info("starting bare kernel")
+            self.km, self.kc = start_new_kernel(startup_timeout=60)
         r = self.execute("%load_ext ipyflow")
         self._ipyflow_loaded = r.error is None
         if r.error:
             log.error("failed to load ipyflow:\n%s", r.error)
         self.execute("%flow mode lazy")
         self._ensure_importable()
-        log.info("kernel ready (ipyflow_loaded=%s)", self._ipyflow_loaded)
+        log.info("kernel ready (ipyflow_loaded=%s, serve=%s)", self._ipyflow_loaded, self.serve)
+
+    def _start_served(self) -> None:
+        import secrets
+
+        from pathlib import Path as _Path
+
+        from ipykeep.daemon.jupyter_host import JupyterServerHost
+
+        log.info("starting server-hosted kernel (command=%s)", self.server_command)
+        self.host = JupyterServerHost(
+            root_dir=_Path.cwd(), notebook=self.notebook, token=secrets.token_hex(16),
+            command=self.server_command, port=self.server_port,
+        )
+        self.host.start(log_file=self.log_file)
+        self.kc = self.host.attach()
+        self.km = None
 
     def _ensure_importable(self) -> None:
         """Make `import ipykeep.inspection` work kernel-side regardless of cwd."""
@@ -347,12 +373,31 @@ class KernelSession:
 
     # ------------------------------------------------------------------ status
     def status(self) -> dict[str, Any]:
-        alive = bool(self.km and self.km.is_alive())
+        connection_file = None
+        server_url = None
+        server_token = None
+        if self.host is not None:
+            alive = self.host.is_alive()
+            connection_file = self.host.connection_file
+            server_url = self.host.url
+            server_token = self.host.token
+        else:
+            alive = bool(self.km and self.km.is_alive())
+            try:
+                connection_file = self.km.connection_file if self.km is not None else None
+            except Exception:
+                connection_file = None
         return {
             "alive": alive,
             "execution_count": self._last_exec_count,
             "ipyflow_loaded": self._ipyflow_loaded,
+            "connection_file": connection_file,
+            "server_url": server_url,
+            "server_token": server_token,
         }
+
+    def server_pid(self) -> Optional[int]:
+        return self.host.server_pid if self.host is not None else None
 
     def shutdown(self) -> None:
         try:
@@ -360,11 +405,14 @@ class KernelSession:
                 self.kc.stop_channels()
         except Exception:
             pass
-        try:
-            if self.km is not None:
-                self.km.shutdown_kernel(now=False)
-        except Exception:
-            pass
+        if self.host is not None:
+            self.host.shutdown()
+        else:
+            try:
+                if self.km is not None:
+                    self.km.shutdown_kernel(now=False)
+            except Exception:
+                pass
         log.info("kernel shut down")
 
 

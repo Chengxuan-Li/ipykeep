@@ -24,6 +24,9 @@ class Config:
     watch_debounce_ms: int = 500
     log_level: str = "INFO"
     summarizers: list[str] = field(default_factory=list)
+    serve: bool = False
+    server_command: str = "lab"
+    server_port: int = 0
 
 
 def _read_table(path: Path) -> dict[str, Any]:
@@ -58,6 +61,9 @@ def load_config(start: Path | None = None) -> Config:
     cfg.inspect_sample_rows = int(table.get("inspect_sample_rows", cfg.inspect_sample_rows))
     cfg.watch_debounce_ms = int(table.get("watch_debounce_ms", cfg.watch_debounce_ms))
     cfg.log_level = str(table.get("log_level", cfg.log_level))
+    cfg.serve = bool(table.get("serve", cfg.serve))
+    cfg.server_command = str(table.get("server_command", cfg.server_command))
+    cfg.server_port = int(table.get("server_port", cfg.server_port))
     summarizers = inspection.get("summarizers", [])
     if isinstance(summarizers, list):
         cfg.summarizers = [str(s) for s in summarizers]
