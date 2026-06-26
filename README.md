@@ -19,9 +19,10 @@ notebook editor, require a special notebook format, or manage a UI.
 
 > **Status:** validated vertical slice. The daemon, kernel manager, staleness
 > tracker, file watcher, and variable inspector are implemented and tested
-> end-to-end on Windows / Python 3.13. The MCP server, `ipykeep init`
-> scaffolding, packaging entry point, and polished example notebooks are planned
-> follow-ups. See [`CLAUDE.md`](CLAUDE.md) for the full design and roadmap.
+> end-to-end on Windows / Python 3.13 — including the MCP server (`ipykeep
+> mcp-serve`) and `ipykeep init` scaffolding. A `CONTRIBUTING.md` and the four
+> polished example notebooks are the remaining follow-ups. See
+> [`CLAUDE.md`](CLAUDE.md) for the full design and roadmap.
 
 ---
 
@@ -104,6 +105,31 @@ python -m ipykeep stop
 When a command needs a daemon and none is running, it says so and points you at
 `ipykeep start`. With a single running daemon (or a `notebook` set in config) the
 notebook argument is optional.
+
+---
+
+## Use from an AI agent (MCP) + `ipykeep init`
+
+Onboard a project in one command:
+
+```bash
+ipykeep init [notebook.ipynb]   # scaffolds .mcp.json, a Claude SKILL.md,
+                                # AGENTS.md, and ipykeep.toml (non-destructive)
+```
+
+That registers an MCP server so agents call ipykeep as **native tools** instead of
+shelling out:
+
+```bash
+pip install "ipykeep[mcp]"      # MCP SDK
+ipykeep mcp-serve               # stdio server (your harness launches this via .mcp.json)
+```
+
+Tools exposed: `start_session`, `stop_session`, `run_stale`, `run_cells`,
+`inspect`, `get_namespace`, `get_stale_set`, `watch_file`, `kernel_status`. The
+agent calls `start_session` first to warm the kernel, then runs the
+edit → `run_stale` → `run_stale(execute=true)` → `inspect` loop. The generated
+`SKILL.md`/`AGENTS.md` teach the agent this workflow.
 
 ---
 

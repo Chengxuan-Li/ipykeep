@@ -6,88 +6,20 @@ connection details (port + token) from the runtime descriptor file.
 from __future__ import annotations
 
 import json
-import socket
-import subprocess
-import sys
-import time
 from pathlib import Path
 from typing import Any, Optional
 
 import typer
 
-from ipykeep.config import load_config
-from ipykeep.daemon.pid import (
-    descriptor_path,
-    is_alive,
-    list_runtimes,
-    log_path,
-    read_runtime,
+from ipykeep.client import (
+    DaemonError,
+    client_call as _client_call,
+    ensure_started,
+    resolve_notebook as _resolve_notebook,
 )
+from ipykeep.daemon.pid import is_alive, log_path, read_runtime
 
 app = typer.Typer(add_completion=False, help="Persistent kernel access for AI coding agents.")
-err = typer.style
-
-
-class DaemonError(RuntimeError):
-    pass
-
-
-# --------------------------------------------------------------------- helpers
-def _resolve_notebook(notebook: Optional[str]) -> Path:
-    if notebook:
-        return Path(notebook).resolve()
-    cfg = load_config()
-    if cfg.notebook:
-        return Path(cfg.notebook).resolve()
-    alive = [r for r in list_runtimes() if is_alive(r.get("pid", -1))]
-    if len(alive) == 1:
-        return Path(alive[0]["notebook"]).resolve()
-    if not alive:
-        raise DaemonError("no running daemon found; start one with `ipykeep start <notebook.ipynb>`")
-    raise DaemonError("multiple daemons running; pass the notebook path explicitly")
-
-
-def _client_call(notebook: Path, method: str, params: Optional[dict[str, Any]] = None,
-                 timeout: float = 60.0) -> Any:
-    info = read_runtime(notebook)
-    if not info or not is_alive(info.get("pid", -1)):
-        raise DaemonError(f"no live daemon for {notebook.name}; run `ipykeep start {notebook}`")
-    req = {"id": 1, "token": info["token"], "method": method, "params": params or {}}
-    try:
-        with socket.create_connection(("127.0.0.1", info["port"]), timeout=timeout) as sock:
-            sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            buf = b""
-            sock.settimeout(timeout)
-            while not buf.endswith(b"\n"):
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-    except OSError as exc:
-        raise DaemonError(f"could not reach daemon for {notebook.name}: {exc}") from exc
-    if not buf:
-        raise DaemonError("empty response from daemon")
-    resp = json.loads(buf)
-    if resp.get("error"):
-        raise DaemonError(resp["error"].get("message", "unknown daemon error"))
-    return resp.get("result")
-
-
-def _spawn_daemon(notebook: Path, serve: bool = False) -> None:
-    logf = open(log_path(notebook), "ab")
-    kwargs: dict[str, Any] = dict(stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, close_fds=True)
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NO_WINDOW
-            | subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        kwargs["start_new_session"] = True
-    argv = [sys.executable, "-m", "ipykeep", "_serve", str(notebook)]
-    if serve:
-        argv.append("--serve")
-    subprocess.Popen(argv, **kwargs)
 
 
 # --------------------------------------------------------------------- commands
@@ -111,29 +43,8 @@ def start(
         raise typer.Exit(0)
 
     typer.echo(f"starting daemon for {nb.name} ...")
-    _spawn_daemon(nb, serve=serve)
-
-    deadline = time.time() + timeout
-    reachable = False
-    while time.time() < deadline:
-        time.sleep(0.25)
-        info = read_runtime(nb)
-        if not (info and is_alive(info.get("pid", -1))):
-            continue
-        try:
-            pong = _client_call(nb, "ping", timeout=5)
-            reachable = True
-            if not pong.get("warming"):
-                break
-        except (DaemonError, OSError):
-            continue
-
-    if not reachable:
-        typer.secho(f"daemon failed to start; see {log_path(nb)}", fg="red", err=True)
-        raise typer.Exit(1)
-
     try:
-        st = _client_call(nb, "status", timeout=10)
+        st = ensure_started(nb, serve=serve, timeout=timeout)
     except DaemonError as exc:
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(1)
@@ -273,6 +184,39 @@ def namespace(notebook: Optional[str] = typer.Argument(None, help="Notebook path
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(1)
     typer.echo(json.dumps(ns, indent=2))
+
+
+@app.command(name="mcp-serve")
+def mcp_serve(
+    notebook: Optional[str] = typer.Argument(None, help="Notebook to target (else from config)."),
+) -> None:
+    """Run the MCP server over stdio (point your harness at this via .mcp.json)."""
+    try:
+        from ipykeep.mcp_server import serve_stdio
+    except ImportError:
+        typer.secho('MCP support not installed — run: pip install "ipykeep[mcp]"',
+                    fg="red", err=True)
+        raise typer.Exit(1)
+    if notebook:
+        # make resolve_notebook(None) in the server pick this notebook
+        import os
+        os.environ["IPYKEEP_NOTEBOOK"] = str(Path(notebook).resolve())
+    serve_stdio()
+
+
+@app.command()
+def init(
+    notebook: Optional[str] = typer.Argument(None, help="Default notebook for this project."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing files."),
+) -> None:
+    """Scaffold integration files: .mcp.json, SKILL.md, AGENTS.md, ipykeep.toml."""
+    from ipykeep.scaffold import run_init
+
+    results = run_init(Path.cwd(), notebook, force=force)
+    for path, action in results:
+        color = "green" if action in ("created", "merged", "appended", "updated", "overwritten") else "yellow"
+        typer.secho(f"  {action:<32} {path}", fg=color)
+    typer.secho("ipykeep project initialized.", fg="green")
 
 
 @app.command(name="_serve", hidden=True)
