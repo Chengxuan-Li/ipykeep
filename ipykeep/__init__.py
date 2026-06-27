@@ -4,4 +4,4 @@ CLI + MCP server providing staleness tracking and variable inspection over a
 long-lived Jupyter kernel with ipyflow loaded.
 """
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
