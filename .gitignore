@@ -21,3 +21,7 @@ scratch/
 .venv/
 .mypy_cache/
 .pytest_cache/
+
+# PyPI upload tokens (never commit secrets)
+.secrets/
+.pypirc
