@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,22 @@ version = "0.1.0.dev0"
 description = "Persistent, stateful Jupyter kernel access for AI coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Chengxuan Li", email = "Lichengxuan@outlook.com" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["jupyter", "kernel", "mcp", "ai-agents", "notebook", "ipyflow", "staleness"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Framework :: Jupyter",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "ipyflow>=0.0.200",
     "jupyter_client>=8",
@@ -23,8 +39,13 @@ inspect = ["pandas", "numpy"]
 # `ipykeep start --serve`: host the kernel in a server so IDEs can attach.
 # jupyterlab also provides the Notebook 7 UI; jupyter_server alone suffices for VS Code.
 serve = ["jupyterlab"]
-# Planned MCP server (Phase 4)
+# MCP server: `ipykeep mcp-serve` (pip install "ipykeep[mcp]")
 mcp = ["mcp>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/Chengxuan-Li/ipykeep"
+Repository = "https://github.com/Chengxuan-Li/ipykeep"
+Issues = "https://github.com/Chengxuan-Li/ipykeep/issues"
 
 [project.scripts]
 ipykeep = "ipykeep.cli:app"
