@@ -15,7 +15,9 @@ import json
 import logging
 import os
 import secrets
+import time
 import traceback
+import uuid
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -29,7 +31,13 @@ from ipykeep.staleness.watcher import FileWatcher
 
 log = logging.getLogger("ipykeep.server")
 
-_NON_KERNEL_METHODS = {"ping", "status", "shutdown"}
+_NON_KERNEL_METHODS = {
+    "ping", "status", "shutdown",
+    # Watcher coordination is pure daemon bookkeeping (no kernel I/O) so an IDE
+    # watcher can attach and start its long-poll while the kernel is still warming.
+    "register_watcher", "unregister_watcher", "set_cell_id_map",
+    "await_run_request", "report_run_complete",
+}
 
 
 class IpykeepServer:
@@ -55,6 +63,18 @@ class IpykeepServer:
         self._kpool = None
         self._server: asyncio.AbstractServer | None = None
 
+        # Delegated-execution state. ``execution_mode`` is "direct" (the daemon
+        # runs cells via its own kernel client — unchanged default) or "delegated"
+        # (an attached IDE watcher runs them so the user sees outputs stream live).
+        self.execution_mode: str = "direct"
+        self.delegate_client: str | None = None     # id of the attached watcher
+        self._last_poll: float = 0.0                 # heartbeat: last await_run_request
+        self._heartbeat_timeout: float = 90.0        # watcher considered gone after this
+        self._pending_run: dict[str, Any] | None = None   # {run_id, cells} awaiting pickup
+        self._run_result: dict[str, Any] | None = None    # result reported by the watcher
+        self._run_posted: asyncio.Event | None = None      # set when a run is enqueued
+        self._run_done: asyncio.Event | None = None        # set when the watcher reports back
+
     # ------------------------------------------------------------- kernel pool
     async def _k(self, fn: Callable, *args: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -66,6 +86,8 @@ class IpykeepServer:
 
         loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
+        self._run_posted = asyncio.Event()
+        self._run_done = asyncio.Event()
         self._kpool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kernel")
 
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -181,7 +203,7 @@ class IpykeepServer:
             asyncio.get_running_loop().call_later(0.1, self._stop.set)  # type: ignore[union-attr]
             return {"stopping": True}
         if method in ("execute_cells", "run_cells"):
-            return await self._k(self.session.execute_cells, params.get("cell_ids", []))
+            return await self._run_cells(params.get("cell_ids", []))
         if method in ("get_namespace_raw", "get_namespace"):
             return await self._k(self.session.get_namespace_raw)
         if method == "inspect":
@@ -194,7 +216,114 @@ class IpykeepServer:
             return await self._run_stale(bool(params.get("execute", False)))
         if method == "watch_file":
             return await self._watch_file(str(params.get("path", "")))
+        if method == "register_watcher":
+            return self._register_watcher(str(params.get("client_id", "") or uuid.uuid4().hex))
+        if method == "unregister_watcher":
+            return self._unregister_watcher(str(params.get("client_id", "")))
+        if method == "set_cell_id_map":
+            return self._set_cell_id_map(params.get("cell_map", []))
+        if method == "await_run_request":
+            return await self._await_run_request(float(params.get("timeout", 30.0)))
+        if method == "report_run_complete":
+            return self._report_run_complete(params.get("run_id"), params.get("results"))
         raise ValueError(f"unknown method: {method}")
+
+    # ------------------------------------------------------- watcher coordination
+    def _register_watcher(self, client_id: str) -> dict[str, Any]:
+        """An IDE watcher attaches; flip to delegated execution mode."""
+        self.delegate_client = client_id
+        self.execution_mode = "delegated"
+        self._last_poll = time.time()
+        log.info("watcher %s registered; execution mode -> delegated", client_id)
+        return {"registered": True, "client_id": client_id}
+
+    def _unregister_watcher(self, client_id: str) -> dict[str, Any]:
+        """Watcher detaches; revert to direct execution and drop the alias table."""
+        self.delegate_client = None
+        self.execution_mode = "direct"
+        if self.tracker is not None:
+            self.tracker.set_alias_map([])
+        log.info("watcher %s unregistered; execution mode -> direct", client_id)
+        return {"unregistered": True}
+
+    def _set_cell_id_map(self, cell_map: Any) -> dict[str, Any]:
+        """Receive the watcher's vscode-uri <-> nbformat-id cell mapping."""
+        entries = cell_map if isinstance(cell_map, list) else []
+        if self.tracker is not None:
+            self.tracker.set_alias_map(entries)
+        return {"set": True, "count": len(entries)}
+
+    def _watcher_alive(self) -> bool:
+        return (self.delegate_client is not None
+                and (time.time() - self._last_poll) < self._heartbeat_timeout)
+
+    async def _await_run_request(self, timeout: float) -> dict[str, Any]:
+        """Long-poll: block until a delegated run is enqueued or ``timeout`` lapses.
+
+        Also serves as the watcher heartbeat (updates ``_last_poll``).
+        """
+        self._last_poll = time.time()
+        if self._pending_run is None:
+            try:
+                await asyncio.wait_for(self._run_posted.wait(), timeout)  # type: ignore[union-attr]
+            except asyncio.TimeoutError:
+                return {"run_id": None, "cells": []}
+        pending = self._pending_run
+        self._pending_run = None
+        self._run_posted.clear()  # type: ignore[union-attr]
+        if pending is None:
+            return {"run_id": None, "cells": []}
+        return {"run_id": pending["run_id"], "cells": pending["cells"]}
+
+    def _report_run_complete(self, run_id: Any, results: Any) -> dict[str, Any]:
+        """Watcher reports it finished running the cells; unblock the waiter.
+
+        The post-run commit (refreshing the stale snapshot) happens in
+        :meth:`_delegated_run` once it resumes, so it is ordered after this call.
+        """
+        self._last_poll = time.time()
+        self._run_result = results if isinstance(results, dict) else None
+        if self._run_done is not None:
+            self._run_done.set()
+        return {"ok": True}
+
+    async def _delegated_run(self, cell_ids: list[Any]) -> dict[str, Any]:
+        """Hand ordered nbformat cell ids to the attached watcher and block until
+        it reports completion. Falls back to direct execution on timeout so a
+        crashed/closed IDE never wedges the agent."""
+        run_id = uuid.uuid4().hex
+        self._run_result = None
+        self._run_done.clear()       # type: ignore[union-attr]
+        self._pending_run = {"run_id": run_id, "cells": list(cell_ids)}
+        self._run_posted.set()       # type: ignore[union-attr]
+        timeout = self.config.delegated_timeout_s
+        try:
+            await asyncio.wait_for(self._run_done.wait(), timeout)  # type: ignore[union-attr]
+        except asyncio.TimeoutError:
+            log.warning("delegated run %s timed out after %.0fs; executing directly",
+                        run_id, timeout)
+            self._pending_run = None
+            self._run_posted.clear()  # type: ignore[union-attr]
+            return await self._k(self.session.execute_cells, list(cell_ids))
+        self._pending_run = None
+        self._run_posted.clear()      # type: ignore[union-attr]
+        result = self._run_result or {"executed": [], "outputs": [], "errors": []}
+        # Commit ONLY the cells the watcher reported it actually ran, so a skipped
+        # or partial run (e.g. the editor refused because the notebook was dirty)
+        # does not falsely clear staleness for cells that never executed.
+        executed_ids = result.get("executed") or []
+        if executed_ids:
+            await self._k(self.session.commit_external_run, list(executed_ids))
+        return result
+
+    async def _run_cells(self, cell_ids: list[Any]) -> dict[str, Any]:
+        if self.execution_mode == "delegated" and self._watcher_alive():
+            selected = await self._k(self.session.resolve_cells, cell_ids)
+            nb_ids = [c.cell_id for c in selected]
+            if not nb_ids:
+                return {"executed": [], "outputs": [], "errors": []}
+            return await self._delegated_run(nb_ids)
+        return await self._k(self.session.execute_cells, cell_ids)
 
     async def _stale_set(self) -> list[dict[str, Any]]:
         plan = await self._k(self.tracker.compute_plan, set(self.dirty_cells))
@@ -205,7 +334,11 @@ class IpykeepServer:
         plan = await self._k(self.tracker.compute_plan, set(self.dirty_cells))
         result: dict[str, Any] = {"stale_cells": plan, "will_execute": execute}
         if execute and plan:
-            result["executed"] = await self._k(self.tracker.execute_plan, plan)
+            if self.execution_mode == "delegated" and self._watcher_alive():
+                nb_ids = [p["cell_id"] for p in plan]
+                result["executed"] = await self._delegated_run(nb_ids)
+            else:
+                result["executed"] = await self._k(self.tracker.execute_plan, plan)
             self.dirty_cells -= {p["cell_id"] for p in plan}
         elif execute:
             result["executed"] = {"executed": [], "outputs": [], "errors": []}
@@ -236,6 +369,8 @@ class IpykeepServer:
             "tracked_cells": len(self.session.cells),
             "watched_files": len(self.watcher.path_to_cells) if self.watcher else 0,
             "stale_set": stale_set,
+            "execution_mode": self.execution_mode,
+            "watcher_attached": self._watcher_alive(),
         })
         return st
 

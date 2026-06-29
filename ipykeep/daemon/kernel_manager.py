@@ -26,6 +26,9 @@ _JSON_SENTINEL = "__IPYKEEP_JSON__"
 # remaps that cell's counter and breaks symbol->cell resolution. Isolating them
 # under one sentinel id keeps every real notebook cell's mapping intact.
 _INTERNAL_CELL_ID = "__ipykeep_internal__"
+# Sentinel stored-hash for a brand-new cell that has not executed, so it always
+# compares unequal to its real source hash and is reported stale until it runs.
+_NEVER_EXECUTED = "__never_executed__"
 
 
 def strip_ansi(text: str) -> str:
@@ -314,15 +317,17 @@ class KernelSession:
         self.execute(code, cell_id=_INTERNAL_CELL_ID)
 
     # --------------------------------------------------------------- run cells
-    def execute_cells(self, cell_ids: list[Any]) -> dict[str, Any]:
-        current = self._load_cells()
-        # carry over execution counts we already know
-        prev = {c.cell_id: c.execution_count for c in self.cells}
-        for c in current:
-            c.execution_count = prev.get(c.cell_id)
+    def resolve_cells(self, cell_ids: list[Any],
+                      current: Optional[list[CellInfo]] = None) -> list[CellInfo]:
+        """Resolve a mix of indices/ids to CellInfo, in notebook order, deduped.
+
+        ``current`` lets callers reuse a freshly-loaded cell list (so execution
+        counts carried over by the caller are preserved).
+        """
+        if current is None:
+            current = self._load_cells()
         by_id = {c.cell_id: c for c in current}
         by_idx = {c.index: c for c in current}
-
         selected: list[CellInfo] = []
         for cid in cell_ids:
             c: Optional[CellInfo] = None
@@ -335,6 +340,16 @@ class KernelSession:
             if c is not None and c not in selected:
                 selected.append(c)
         selected.sort(key=lambda c: c.index)
+        return selected
+
+    def execute_cells(self, cell_ids: list[Any]) -> dict[str, Any]:
+        current = self._load_cells()
+        # carry over execution counts we already know
+        prev = {c.cell_id: c.execution_count for c in self.cells}
+        for c in current:
+            c.execution_count = prev.get(c.cell_id)
+
+        selected = self.resolve_cells(cell_ids, current=current)
 
         executed: list[int] = []
         outputs: list[str] = []
@@ -349,6 +364,37 @@ class KernelSession:
         self.cells = current
         self._set_positions()
         return {"executed": executed, "outputs": outputs, "errors": errors}
+
+    def commit_external_run(self, cell_ids: list[Any]) -> dict[str, Any]:
+        """Refresh bookkeeping for cells an external frontend (e.g. VS Code) ran,
+        *without* issuing any execution.
+
+        Only the cells that actually ran are marked up-to-date (their stored source
+        adopts the current disk source). Every other cell keeps its prior stored
+        source/hash, so a cell that was edited but NOT run stays stale; a brand-new
+        cell that did not run is recorded as never-executed (also stale). Re-applies
+        notebook positions to ipyflow. Used by the daemon's delegated execution path.
+        """
+        current = self._load_cells()
+        prev_by_id = {c.cell_id: c for c in self.cells}
+        committed = {c.cell_id for c in self.resolve_cells(cell_ids, current=current)}
+        snapshot: list[CellInfo] = []
+        for c in current:
+            if c.cell_id in committed:
+                if c.cell_id in prev_by_id:
+                    c.execution_count = prev_by_id[c.cell_id].execution_count
+                snapshot.append(c)  # adopt current disk source/hash -> fresh
+            elif c.cell_id in prev_by_id:
+                old = prev_by_id[c.cell_id]
+                old.index = c.index  # preserve prior hash; only refresh position
+                snapshot.append(old)
+            else:
+                c.source_hash = _NEVER_EXECUTED  # new + unrun -> stays stale
+                c.execution_count = None
+                snapshot.append(c)
+        self.cells = snapshot
+        self._set_positions()
+        return {"committed": sorted(committed)}
 
     # --------------------------------------------------------------- namespace
     def get_namespace_raw(self) -> list[dict[str, Any]]:

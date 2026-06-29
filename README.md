@@ -20,9 +20,12 @@ notebook editor, require a special notebook format, or manage a UI.
 > **Status:** validated vertical slice. The daemon, kernel manager, staleness
 > tracker, file watcher, and variable inspector are implemented and tested
 > end-to-end on Windows / Python 3.13 — including the MCP server (`ipykeep
-> mcp-serve`) and `ipykeep init` scaffolding. A `CONTRIBUTING.md` and the four
-> polished example notebooks are the remaining follow-ups. See
-> [`CLAUDE.md`](CLAUDE.md) for the full design and roadmap.
+> mcp-serve`) and `ipykeep init` scaffolding. A **VS Code companion extension**
+> (one-click open + watch-the-agent-run-live) lives in
+> [`editors/vscode/`](editors/vscode/) — see
+> [`ipykeep open`](#watch-the-agent-work-live-in-vs-code) below. A
+> `CONTRIBUTING.md` and the four polished example notebooks are the remaining
+> follow-ups. See [`CLAUDE.md`](CLAUDE.md) for the full design and roadmap.
 
 ---
 
@@ -101,6 +104,7 @@ python -m ipykeep stop
 | `inspect <var_name>` | JSON summary of a runtime variable (type, shape, dtypes, nulls, stats, sample, size). |
 | `namespace` | JSON list of top-level variables with type, size, and last-updated cell. |
 | `watch <file_path>` | Manually register an external file dependency that static analysis missed. |
+| `open <notebook.ipynb>` | Boot the daemon with a hosted server and open the notebook on the warm kernel in VS Code (one click, via the companion extension). |
 
 When a command needs a daemon and none is running, it says so and points you at
 `ipykeep start`. With a single running daemon (or a `notebook` set in config) the
@@ -161,6 +165,32 @@ running tracked cells from the IDE can lag ipykeep's stale set until the next
 `run-stale`; and (2) only one side should edit/save the `.ipynb` file at a time.
 Upside: with an IDE attached, outputs are persisted back to the notebook (the
 CLI-only path does not write outputs).
+
+---
+
+## Watch the agent work live in VS Code
+
+The [`editors/vscode/`](editors/vscode/) companion extension turns the manual
+`--serve` attach into a one-click, watch-it-run experience:
+
+```bash
+ipykeep open examples/01_eda.ipynb     # boots --serve + opens VS Code on the warm kernel
+```
+
+With the extension installed, the notebook opens already bound to the warm
+kernel (no URL pasting, no manual kernel pick), and — crucially — when the agent
+runs `run-stale --execute`, the daemon **delegates** execution to VS Code so the
+cells re-run and their **outputs stream into your editor live**, instead of
+disappearing into a headless kernel. Source edits the agent makes on disk show
+up too, and a status-bar item shows the current stale count.
+
+This is purely additive and watcher-gated: with no extension attached, the
+daemon behaves exactly as the CLI/headless path described above.
+
+See **[`editors/vscode/README.md`](editors/vscode/README.md)** for fresh-machine
+setup, how the delegated-execution handshake works, and a **known
+staleness-propagation limitation** under heavy iterative editing (plus the
+planned fix).
 
 ---
 

@@ -69,6 +69,80 @@ def start(
             )
 
 
+_VSCODE_EXTENSION_ID = "ipykeep.ipykeep-vscode"
+
+
+def _fire_vscode_uri(uri: str) -> bool:
+    """Open a vscode:// deep link via the `code` CLI. Returns True on success."""
+    import shutil
+    import subprocess
+
+    code = shutil.which("code") or shutil.which("code.cmd")
+    if not code:
+        return False
+    try:
+        subprocess.run([code, "--open-url", uri], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
+@app.command(name="open")
+def open_cmd(
+    notebook: str = typer.Argument(..., help="Path to the .ipynb to open live in VS Code."),
+    timeout: float = typer.Option(180.0, help="Seconds to wait for warm-up."),
+) -> None:
+    """Open the notebook on its warm kernel in VS Code, one click.
+
+    Boots the daemon with a hosted Jupyter server (``--serve``) and fires the
+    ipykeep VS Code extension's deep link so the notebook opens already attached
+    to the warm kernel. Falls back to printing the server URL if VS Code or the
+    extension is unavailable.
+    """
+    from urllib.parse import quote
+
+    nb = Path(notebook).resolve()
+    if not nb.is_file():
+        typer.secho(f"notebook not found: {nb}", fg="red", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"starting daemon for {nb.name} ...")
+    try:
+        st = ensure_started(nb, serve=True, timeout=timeout)
+    except DaemonError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(1)
+
+    if st.get("warming"):
+        typer.secho(f"daemon up (pid {st['pid']}); kernel still warming — try again shortly.",
+                    fg="yellow")
+        raise typer.Exit(0)
+    if st.get("warm_error"):
+        typer.secho(f"daemon up but warm failed: {st['warm_error']} (see {log_path(nb)})", fg="red")
+        raise typer.Exit(1)
+
+    typer.secho(
+        f"daemon ready (pid {st['pid']}): {st['tracked_cells']} cells warm, "
+        f"ipyflow_loaded={st['ipyflow_loaded']}",
+        fg="green",
+    )
+
+    uri = f"vscode://{_VSCODE_EXTENSION_ID}/open?notebook={quote(str(nb), safe='')}"
+    if _fire_vscode_uri(uri):
+        typer.secho(f"opening {nb.name} in VS Code on the warm kernel ...", fg="cyan")
+    else:
+        typer.secho("could not launch VS Code automatically. To open manually:", fg="yellow")
+        typer.secho(f"  deep link: {uri}", fg="cyan")
+        if st.get("server_url"):
+            typer.secho(f"  or attach by URL: {st['server_url']}", fg="cyan")
+            typer.secho(
+                "    (VS Code: 'Jupyter: Connect to a Remote Jupyter Server' -> paste it, "
+                "then pick the running kernel)",
+                fg="cyan",
+            )
+
+
 @app.command()
 def stop(notebook: Optional[str] = typer.Argument(None, help="Notebook path (optional).")) -> None:
     """Gracefully shut down the daemon and kernel."""

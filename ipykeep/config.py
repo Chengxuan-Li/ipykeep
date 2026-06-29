@@ -27,6 +27,7 @@ class Config:
     serve: bool = False
     server_command: str = "lab"
     server_port: int = 0
+    delegated_timeout_s: float = 300.0
 
 
 def _read_table(path: Path) -> dict[str, Any]:
@@ -64,6 +65,7 @@ def load_config(start: Path | None = None) -> Config:
     cfg.serve = bool(table.get("serve", cfg.serve))
     cfg.server_command = str(table.get("server_command", cfg.server_command))
     cfg.server_port = int(table.get("server_port", cfg.server_port))
+    cfg.delegated_timeout_s = float(table.get("delegated_timeout_s", cfg.delegated_timeout_s))
     summarizers = inspection.get("summarizers", [])
     if isinstance(summarizers, list):
         cfg.summarizers = [str(s) for s in summarizers]

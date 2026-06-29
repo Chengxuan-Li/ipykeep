@@ -24,6 +24,26 @@ from ipykeep.daemon.kernel_manager import CellInfo, KernelSession
 class StalenessTracker:
     def __init__(self, session: KernelSession):
         self.session = session
+        # Maps a foreign cell id (e.g. a VS Code "vscode-notebook-cell:" URI that
+        # an IDE-issued execution tags onto ipyflow) back to the notebook's
+        # nbformat cell id. Empty unless a delegating watcher is attached, in
+        # which case _dataflow normalization is a no-op and behavior is
+        # byte-identical to direct/CLI/Lab operation.
+        self.alias_map: dict[str, str] = {}
+
+    def set_alias_map(self, entries: Iterable[dict[str, Any]]) -> None:
+        """Rebuild the foreign-id -> nbformat-id table from watcher entries.
+
+        Each entry is ``{"vscode_uri", "nbformat_id", "index"}``; only the first
+        two are used here. A falsy uri or id is skipped.
+        """
+        amap: dict[str, str] = {}
+        for e in entries or ():
+            uri = e.get("vscode_uri")
+            nb_id = e.get("nbformat_id")
+            if uri and nb_id:
+                amap[str(uri)] = str(nb_id)
+        self.alias_map = amap
 
     def compute_plan(self, dirty_cells: Optional[Iterable[str]] = None) -> list[dict[str, Any]]:
         session = self.session
@@ -70,12 +90,18 @@ class StalenessTracker:
         """Return (cell_id -> vars it defines, cell_id -> downstream cell_ids)."""
         defines: dict[str, list[str]] = {}
         downstream: dict[str, set[str]] = {}
+        amap = self.alias_map
         for sym in self.session.get_depgraph():
+            # Fold any IDE-issued (foreign) cell id back to its nbformat id so a
+            # cell executed by VS Code still resolves to the notebook cell ipyflow
+            # would otherwise track under a separate identity.
             dc = sym.get("defining_cell")
+            dc = amap.get(dc, dc)
             if dc not in known_ids:
                 continue
             defines.setdefault(dc, []).append(sym["name"])
             for live in sym.get("live_cells", []):
+                live = amap.get(live, live)
                 if live in known_ids and live != dc:
                     downstream.setdefault(dc, set()).add(live)
         return defines, downstream

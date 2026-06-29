@@ -16,6 +16,8 @@ _AGENTS_MARKER = "<!-- ipykeep:begin -->"
 
 MCP_ENTRY = {"command": "ipykeep", "args": ["mcp-serve"], "cwd": "${workspaceFolder}"}
 
+VSCODE_EXTENSION_ID = "ipykeep.ipykeep-vscode"
+
 SKILL_MD = """\
 ---
 name: ipykeep
@@ -56,10 +58,17 @@ commands shown below.
 `ipykeep inspect <var> -n <nb>` · `ipykeep namespace <nb>` ·
 `ipykeep run <ids> -n <nb>` · `ipykeep watch <path> -n <nb>` · `ipykeep stop <nb>`
 
-## Letting a human view the notebook live
-Start with `serve=true` (MCP) / `ipykeep start --serve <nb>` to host the kernel in
-a Jupyter server so VS Code / JupyterLab can attach to the same kernel. Keep
-owning cell execution; let the human use the IDE for inspection.
+## Letting a human watch you work live (VS Code)
+For one-click open of the notebook on the warm kernel with your edits AND cell
+executions streaming live into the user's editor, install the **ipykeep VS Code
+extension** and have the human run `ipykeep open <nb>` (boots a hosted server and
+opens VS Code attached to the warm kernel). While the extension is attached, your
+`run_stale --execute` is delegated to VS Code so outputs render in the cells the
+human is watching — keep using `run_stale` exactly as normal.
+
+Without the extension: `serve=true` (MCP) / `ipykeep start --serve <nb>` still
+hosts the kernel so VS Code / JupyterLab can attach for inspection; you keep
+owning execution (outputs won't stream into their cells in that mode).
 """
 
 AGENTS_SECTION = """\
@@ -89,6 +98,7 @@ log_level = "INFO"
 serve = false                    # host the kernel in a Jupyter server (IDE attach)
 server_command = "lab"           # "lab" | "notebook" | "server"
 server_port = 0                  # 0 = pick a free port
+delegated_timeout_s = 300        # wait for the VS Code watcher before direct fallback
 
 [tool.ipykeep.inspection]
 summarizers = []                 # "module.path:callable" custom summarizers
@@ -159,6 +169,28 @@ def _merge_agents(path: Path, notebook: str, force: bool, results: list[tuple[st
     results.append((str(path), "created"))
 
 
+def _merge_vscode_extensions(path: Path, force: bool, results: list[tuple[str, str]]) -> None:
+    """Recommend the ipykeep VS Code companion in .vscode/extensions.json."""
+    existed = path.exists()
+    data: dict = {}
+    if existed:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    recs = data.setdefault("recommendations", [])
+    if not isinstance(recs, list):
+        recs = data["recommendations"] = []
+    if VSCODE_EXTENSION_ID in recs and not force:
+        results.append((str(path), "skipped (extension already recommended)"))
+        return
+    if VSCODE_EXTENSION_ID not in recs:
+        recs.append(VSCODE_EXTENSION_ID)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    results.append((str(path), "merged" if existed else "created"))
+
+
 def run_init(target_dir: Path, notebook: Optional[str] = None,
              force: bool = False) -> list[tuple[str, str]]:
     target_dir = Path(target_dir)
@@ -169,4 +201,5 @@ def run_init(target_dir: Path, notebook: Optional[str] = None,
     _write(target_dir / ".claude" / "skills" / "ipykeep" / "SKILL.md", SKILL_MD, force, results)
     _merge_agents(target_dir / "AGENTS.md", nb, force, results)
     _write(target_dir / "ipykeep.toml", IPYKEEP_TOML.format(notebook=nb), force, results)
+    _merge_vscode_extensions(target_dir / ".vscode" / "extensions.json", force, results)
     return results

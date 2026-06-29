@@ -1,0 +1,64 @@
+{
+  "name": "ipykeep-vscode",
+  "displayName": "ipykeep — live warm kernel",
+  "description": "One-click open of a notebook on its ipykeep warm kernel, with the agent's edits and cell executions streaming live.",
+  "version": "0.1.0",
+  "publisher": "ipykeep",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Notebooks",
+    "Data Science"
+  ],
+  "extensionDependencies": [
+    "ms-toolsai.jupyter"
+  ],
+  "activationEvents": [
+    "onNotebook:jupyter-notebook"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ipykeep.openLiveNotebook",
+        "title": "ipykeep: Open Live Notebook (warm kernel)"
+      },
+      {
+        "command": "ipykeep.runStale",
+        "title": "ipykeep: Run stale cells"
+      },
+      {
+        "command": "ipykeep.detach",
+        "title": "ipykeep: Detach watcher (revert to direct execution)"
+      }
+    ],
+    "configuration": {
+      "title": "ipykeep",
+      "properties": {
+        "ipykeep.pollIntervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "description": "Long-poll window (seconds) for the delegated-run request loop."
+        },
+        "ipykeep.staleRefreshSeconds": {
+          "type": "number",
+          "default": 4,
+          "description": "How often to refresh stale-cell decorations from the daemon."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run build -- --sourcemap --watch",
+    "compile": "tsc -p ./ --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.84.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}
